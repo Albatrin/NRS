@@ -90,6 +90,71 @@ static void MX_USART1_UART_Init(void);
 /* Private user code ---------------------------------------------------------*/
 /* USER CODE BEGIN 0 */
 
+void ESP_SendHTTPPost(const char* type, float value)
+{
+    char payload[150];
+    char http_request[400];
+    char cmd[50];
+
+    //  JSON payload
+    int payload_len = snprintf(payload, sizeof(payload),
+        "{\"userId\":\"6969879105a4050f41712049\",\"type\":\"%s\",\"value\":%.1f}",
+        type, value);
+
+
+    snprintf(http_request, sizeof(http_request),
+        "POST /api/sensorData HTTP/1.1\r\n"
+        "Host: 172.20.10.10:3001\r\n"
+        "Content-Type: application/json\r\n"
+        "Content-Length: %d\r\n\r\n"
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+        "%s",
+        payload_len, payload);
+
+    int request_len = strlen(http_request);
+
+    //  TCP do backenda
+    const char *cmd_connect = "AT+CIPSTART=\"TCP\",\"172.20.10.10\",3001\r\n";
+    HAL_UART_Transmit(&huart2, (uint8_t*)cmd_connect, strlen(cmd_connect), HAL_MAX_DELAY);
+    HAL_Delay(2000);
+
+
+    snprintf(cmd, sizeof(cmd), "AT+CIPSEND=%d\r\n", request_len);
+    HAL_UART_Transmit(&huart2, (uint8_t*)cmd, strlen(cmd), HAL_MAX_DELAY);
+    HAL_Delay(1000);
+
+    HAL_UART_Transmit(&huart2, (uint8_t*)http_request, request_len, HAL_MAX_DELAY);
+    HAL_Delay(2000);
+
+    const char *cmd_close = "AT+CIPCLOSE\r\n";
+    HAL_UART_Transmit(&huart2, (uint8_t*)cmd_close, strlen(cmd_close), HAL_MAX_DELAY);
+    HAL_Delay(500);
+}
+
 // Temperatura
 float Read_Temperature(void)
 {
@@ -123,15 +188,12 @@ uint8_t LSM303DLHC_ReadReg(uint8_t reg)
 
 void LSM303DLHC_Init(void)
 {
-    // CTRL_REG1_A: 100Hz ODR, normal mode, vsi trije kanali omogočeni
-    // 0x57 = 0101 0111 = 100Hz, normal mode, XYZ enabled
+
     LSM303DLHC_WriteReg(LSM303DLHC_CTRL_REG1_A, 0x57);
 
-    // CTRL_REG4_A: ±2g full scale, high resolution
-    // 0x08 = 0000 1000 = ±2g, high resolution mode
     LSM303DLHC_WriteReg(LSM303DLHC_CTRL_REG4_A, 0x08);
 
-    HAL_Delay(10);  // Počakaj na inicializacijo
+    HAL_Delay(10);
 }
 
 void LSM303DLHC_ReadAccel(int16_t* x, int16_t* y, int16_t* z)
@@ -154,9 +216,8 @@ void LSM303DLHC_ReadAccel_G(float* x, float* y, float* z)
     int16_t raw_x, raw_y, raw_z;
     LSM303DLHC_ReadAccel(&raw_x, &raw_y, &raw_z);
 
-    // Pretvorba v g (za ±2g in 12-bit resolucijo)
-    // Občutljivost: ~1 mg/LSB za ±2g range
-    *x = raw_x / 16384.0f;  // 2^14 = 16384 za ±2g
+
+    *x = raw_x / 16384.0f;
     *y = raw_y / 16384.0f;
     *z = raw_z / 16384.0f;
 }
@@ -164,40 +225,33 @@ void LSM303DLHC_ReadAccel_G(float* x, float* y, float* z)
 // Algoritem za štetje korakov - vrne magnitudо za debug
 float Process_Steps(float ax, float ay, float az)
 {
-    // Izračunaj magnitudо pospeška
     float magnitude = sqrtf(ax*ax + ay*ay + az*az);
-
-    // Izračunaj razliko od gravitacije (amplituda gibanja)
+    //tukaj je razlika
     float accel_diff = fabs(magnitude - GRAVITY);
 
     uint32_t current_time = HAL_GetTick();
     uint32_t time_since_last_step = current_time - last_step_time;
 
-    // Stanje 0: Čakanje na vrh (korak)
     if (step_state == 0)
     {
-        // Detekcija vrha: preseganje praga IN večja amplituda kot prej
         if (accel_diff > STEP_THRESHOLD && accel_diff > fabs(prev_magnitude - GRAVITY))
         {
-            // Preveri časovni interval
             if (time_since_last_step > STEP_MIN_INTERVAL)
             {
                 step_count++;
                 last_step_time = current_time;
-                step_state = 1;  // Preklopi na čakanje na padec
+                step_state = 1;
             }
         }
     }
-    // Stanje 1: Čakanje na padec (vrnitev pod prag)
     else if (step_state == 1)
     {
-        if (accel_diff < STEP_THRESHOLD * 0.6f)  // Histereza
+        if (accel_diff < STEP_THRESHOLD * 0.6f)
         {
-            step_state = 0;  // Preklopi na čakanje na naslednji vrh
+            step_state = 0;
         }
     }
 
-    // Reset, če je preteklo preveč časa
     if (time_since_last_step > STEP_MAX_INTERVAL)
     {
         step_state = 0;
@@ -208,10 +262,8 @@ float Process_Steps(float ax, float ay, float az)
 }
 
 
-void ESP_Test_AT(void)
-{
 
-}
+
 /* USER CODE END 0 */
 
 /**
@@ -252,58 +304,79 @@ int main(void)
   /* USER CODE BEGIN 2 */
 
   HAL_ADCEx_Calibration_Start(&hadc1, ADC_SINGLE_ENDED);
+  const char *cmd_mode = "AT+CWMODE=1\r\n";
+  HAL_UART_Transmit(&huart2, (uint8_t *)cmd_mode, strlen(cmd_mode), HAL_MAX_DELAY);
+  HAL_Delay(1000);
 
-  // Inicializacija akcelometra
+  // 2. Poveži na WiFi (SPREMENI IME IN GESLO!)
+  const char *cmd_wifi = "AT+CWJAP=\"Albatrin\",\"albatrin12\"\r\n";
+  HAL_UART_Transmit(&huart2, (uint8_t *)cmd_wifi, strlen(cmd_wifi), HAL_MAX_DELAY);
+  HAL_Delay(5000);
+
   LSM303DLHC_Init();
   HAL_Delay(1000);
+
+
 
   /* USER CODE END 2 */
 
   /* Infinite loop */
   /* USER CODE BEGIN WHILE */
   uint32_t temp_update_time = 0;
+  uint32_t send_data_time = 0;
   float magnitude = 0;
 
   while (1)
-  {
-    /* USER CODE END WHILE */
-
-    /* USER CODE BEGIN 3 */
-
-	  if (!esp_init_done)
-	      {
-	          const char *cmd = "AT+CWMODE=1\r\n";
-	          HAL_UART_Transmit(&huart2, (uint8_t *)cmd, strlen(cmd), HAL_MAX_DELAY);
-	          esp_init_done = 1;
-
-	          HAL_Delay(500);
-	      }
-	 HAL_Delay(2000);
-
-
-    float ax, ay, az;
-    LSM303DLHC_ReadAccel_G(&ax, &ay, &az);
-
-    // Procesiranje korakov
-    magnitude = Process_Steps(ax, ay, az);
-
-    // izpis vsakih 1000 ms
-    if (HAL_GetTick() - temp_update_time > 1000)
     {
-        temp_update_time = HAL_GetTick();
+      /* USER CODE END WHILE */
 
-        float temperatura = Read_Temperature();
-        float diff = fabs(magnitude - GRAVITY);
+      /* USER CODE BEGIN 3 */
 
-        int len = snprintf(uartBuf, sizeof(uartBuf),
-                          "Temp: %.1f°C | Koraki: %lu | Mag: %.2f (diff: %.2f) | X=%.2f Y=%.2f Z=%.2f\r\n",
-                          temperatura, step_count, magnitude, diff, ax, ay, az);
+      float ax, ay, az;
+      LSM303DLHC_ReadAccel_G(&ax, &ay, &az);
 
-        HAL_UART_Transmit(&huart2, (uint8_t*)uartBuf, len, HAL_MAX_DELAY);
+      // Procesiranje korakov
+      magnitude = Process_Steps(ax, ay, az);
+
+      // Debug izpis vsakih 1000 ms
+      if (HAL_GetTick() - temp_update_time > 1000)
+      {
+          temp_update_time = HAL_GetTick();
+
+          float temperatura = Read_Temperature();
+          float diff = fabs(magnitude - GRAVITY);
+
+          int len = snprintf(uartBuf, sizeof(uartBuf),
+                            "Temp: %.1f°C | Koraki: %lu | Mag: %.2f (diff: %.2f) | X=%.2f Y=%.2f Z=%.2f\r\n",
+                            temperatura, step_count, magnitude, diff, ax, ay, az);
+
+          HAL_UART_Transmit(&huart2, (uint8_t*)uartBuf, len, HAL_MAX_DELAY);
+      }
+
+      // Pošlji podatke na backend vsakih 10 sekund
+      if (HAL_GetTick() - send_data_time > 10000)
+      {
+          send_data_time = HAL_GetTick();
+
+          float temperatura = Read_Temperature();
+
+          // Pošlji temperaturo
+          ESP_SendHTTPPost("temperature", temperatura);
+
+          HAL_Delay(500);  // Kratek delay med poštama
+
+          // Pošlji korake
+          ESP_SendHTTPPost("steps", (float)step_count);
+
+          // Debug izpis
+          int len = snprintf(uartBuf, sizeof(uartBuf),
+                            ">>> Podatki poslani: Temp=%.1f°C, Koraki=%lu\r\n",
+                            temperatura, step_count);
+          HAL_UART_Transmit(&huart2, (uint8_t*)uartBuf, len, HAL_MAX_DELAY);
+      }
+
+      HAL_Delay(10);  // 100 Hz vzorčenje
     }
-
-    HAL_Delay(10);  // 100 Hz vzorčenje
-  }
   /* USER CODE END 3 */
 }
 
