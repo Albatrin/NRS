@@ -44,6 +44,15 @@
 #define STEP_MAX_INTERVAL 2000    // Maksimalen čas med koraki (ms)
 #define GRAVITY 1.0f              // Gravitacijski pospešek (g)
 
+#define AP_SSID "ESP32-WEB"
+#define AP_PASS "12345678"
+
+#define WIFI_SSID "Albatrin"
+#define WIFI_PASS "albatrin12"
+
+#define WEBSERVER_PORT 80
+#define WEBSERVER_TIMEOUT 60
+
 /* USER CODE END PD */
 
 /* Private macro -------------------------------------------------------------*/
@@ -90,6 +99,45 @@ static void MX_USART1_UART_Init(void);
 /* Private user code ---------------------------------------------------------*/
 /* USER CODE BEGIN 0 */
 
+static void esp_start_webserver(void)
+{
+  char cmd[96];
+
+  HAL_UART_Transmit(&huart2, (uint8_t*)"AT+SYSSTORE=1\r\n", 15, HAL_MAX_DELAY);
+  HAL_Delay(1000);
+
+  HAL_UART_Transmit(&huart2, (uint8_t*)"AT+CWAUTOCONN=1\r\n", 17, HAL_MAX_DELAY);
+  HAL_Delay(1000);
+
+  HAL_UART_Transmit(&huart2, (uint8_t*)"AT+CWMODE=3\r\n", 13, HAL_MAX_DELAY);
+  HAL_Delay(2000);
+
+  snprintf(cmd, sizeof(cmd), "AT+CWSAP=\"%s\",\"%s\",11,1,3\r\n", AP_SSID, AP_PASS);
+  HAL_UART_Transmit(&huart2, (uint8_t*)cmd, strlen(cmd), HAL_MAX_DELAY);
+  HAL_Delay(3000);
+
+
+  snprintf(cmd, sizeof(cmd), "AT+WEBSERVER=1,%u,%u\r\n", WEBSERVER_PORT, WEBSERVER_TIMEOUT);
+  HAL_UART_Transmit(&huart2, (uint8_t*)cmd, strlen(cmd), HAL_MAX_DELAY);
+  HAL_Delay(5000);
+}
+
+static HAL_StatusTypeDef esp_setup_wifi(void)
+{
+    HAL_UART_Transmit(&huart2, (uint8_t*)"AT+CWMODE=3\r\n", 13, HAL_MAX_DELAY);
+    HAL_Delay(2000);
+
+    char cmd[128];
+    snprintf(cmd, sizeof(cmd), "AT+CWJAP=\"%s\",\"%s\"\r\n", WIFI_SSID, WIFI_PASS);
+    HAL_UART_Transmit(&huart2, (uint8_t*)cmd, strlen(cmd), HAL_MAX_DELAY);
+    HAL_Delay(10000);  // Počakaj na WiFi povezavo (lahko traja dolgo)
+
+    HAL_UART_Transmit(&huart2, (uint8_t*)"AT+CIPMUX=1\r\n", 13, HAL_MAX_DELAY);
+    HAL_Delay(1000);
+
+    return HAL_OK;
+}
+
 void ESP_SendHTTPPost(const char* type, float value)
 {
     char payload[150];
@@ -98,62 +146,39 @@ void ESP_SendHTTPPost(const char* type, float value)
 
     //  JSON payload
     int payload_len = snprintf(payload, sizeof(payload),
-        "{\"userId\":\"6969879105a4050f41712049\",\"type\":\"%s\",\"value\":%.1f}",
-        type, value);
-
+            "{\"userId\":\"6969879105a4050f41712049\",\"type\":\"%s\",\"value\":%.1f}",
+            type, value);
 
     snprintf(http_request, sizeof(http_request),
-        "POST /api/sensorData HTTP/1.1\r\n"
-        "Host: 172.20.10.10:3001\r\n"
-        "Content-Type: application/json\r\n"
-        "Content-Length: %d\r\n\r\n"
+             "POST /api/sensorData HTTP/1.1\r\n"
+             "Host: 172.20.10.10:3001\r\n"
+             "Content-Type: application/json\r\n"
+             "Content-Length: %d\r\n\r\n"
+             "%s",
+             payload_len, payload);
 
 
+    	int request_len = strlen(http_request);
+
+        //  TCP do backenda
+        const char *cmd_connect = "AT+CIPSTART=\"TCP\",\"172.20.10.10\",3001\r\n";
+        HAL_UART_Transmit(&huart2, (uint8_t*)cmd_connect, strlen(cmd_connect), HAL_MAX_DELAY);
+        HAL_Delay(2000);
 
 
+        snprintf(cmd, sizeof(cmd), "AT+CIPSEND=%d\r\n", request_len);
+        HAL_UART_Transmit(&huart2, (uint8_t*)cmd, strlen(cmd), HAL_MAX_DELAY);
+        HAL_Delay(1000);
 
+        HAL_UART_Transmit(&huart2, (uint8_t*)http_request, request_len, HAL_MAX_DELAY);
+        HAL_Delay(2000);
 
+        const char *cmd_close = "AT+CIPCLOSE\r\n";
+        HAL_UART_Transmit(&huart2, (uint8_t*)cmd_close, strlen(cmd_close), HAL_MAX_DELAY);
+        HAL_Delay(500);
 
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-        "%s",
-        payload_len, payload);
-
-    int request_len = strlen(http_request);
-
-    //  TCP do backenda
-    const char *cmd_connect = "AT+CIPSTART=\"TCP\",\"172.20.10.10\",3001\r\n";
-    HAL_UART_Transmit(&huart2, (uint8_t*)cmd_connect, strlen(cmd_connect), HAL_MAX_DELAY);
-    HAL_Delay(2000);
-
-
-    snprintf(cmd, sizeof(cmd), "AT+CIPSEND=%d\r\n", request_len);
-    HAL_UART_Transmit(&huart2, (uint8_t*)cmd, strlen(cmd), HAL_MAX_DELAY);
-    HAL_Delay(1000);
-
-    HAL_UART_Transmit(&huart2, (uint8_t*)http_request, request_len, HAL_MAX_DELAY);
-    HAL_Delay(2000);
-
-    const char *cmd_close = "AT+CIPCLOSE\r\n";
-    HAL_UART_Transmit(&huart2, (uint8_t*)cmd_close, strlen(cmd_close), HAL_MAX_DELAY);
-    HAL_Delay(500);
 }
+
 
 // Temperatura
 float Read_Temperature(void)
@@ -171,7 +196,6 @@ float Read_Temperature(void)
     return calibrated_temp;
 }
 
-// Funkcije za LSM303DLHC akcelometer
 
 void LSM303DLHC_WriteReg(uint8_t reg, uint8_t value)
 {
@@ -200,7 +224,6 @@ void LSM303DLHC_ReadAccel(int16_t* x, int16_t* y, int16_t* z)
 {
     uint8_t buffer[6];
 
-    // Preberi vse 6 bajtov (X, Y, Z - low in high)
     HAL_I2C_Mem_Read(&hi2c1, LSM303DLHC_ACC_ADDR,
                      LSM303DLHC_OUT_X_L_A | 0x80,  // 0x80 = auto-increment
                      I2C_MEMADD_SIZE_8BIT,
@@ -222,11 +245,9 @@ void LSM303DLHC_ReadAccel_G(float* x, float* y, float* z)
     *z = raw_z / 16384.0f;
 }
 
-// Algoritem za štetje korakov - vrne magnitudо za debug
 float Process_Steps(float ax, float ay, float az)
 {
     float magnitude = sqrtf(ax*ax + ay*ay + az*az);
-    //tukaj je razlika
     float accel_diff = fabs(magnitude - GRAVITY);
 
     uint32_t current_time = HAL_GetTick();
@@ -258,7 +279,7 @@ float Process_Steps(float ax, float ay, float az)
     }
 
     prev_magnitude = magnitude;
-    return magnitude;  // Vrni za debug izpis
+    return magnitude;
 }
 
 
@@ -304,19 +325,18 @@ int main(void)
   /* USER CODE BEGIN 2 */
 
   HAL_ADCEx_Calibration_Start(&hadc1, ADC_SINGLE_ENDED);
-  const char *cmd_mode = "AT+CWMODE=1\r\n";
-  HAL_UART_Transmit(&huart2, (uint8_t *)cmd_mode, strlen(cmd_mode), HAL_MAX_DELAY);
   HAL_Delay(1000);
 
-  // 2. Poveži na WiFi (SPREMENI IME IN GESLO!)
-  const char *cmd_wifi = "AT+CWJAP=\"Albatrin\",\"albatrin12\"\r\n";
-  HAL_UART_Transmit(&huart2, (uint8_t *)cmd_wifi, strlen(cmd_wifi), HAL_MAX_DELAY);
   HAL_Delay(5000);
 
   LSM303DLHC_Init();
   HAL_Delay(1000);
 
+  esp_setup_wifi();
+  HAL_Delay(2000);
 
+  //esp_start_webserver();
+  HAL_Delay(2000);
 
   /* USER CODE END 2 */
 
@@ -353,7 +373,6 @@ int main(void)
           HAL_UART_Transmit(&huart2, (uint8_t*)uartBuf, len, HAL_MAX_DELAY);
       }
 
-      // Pošlji podatke na backend vsakih 10 sekund
       if (HAL_GetTick() - send_data_time > 10000)
       {
           send_data_time = HAL_GetTick();
