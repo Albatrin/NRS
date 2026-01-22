@@ -11,7 +11,7 @@
 
 /* Private includes ----------------------------------------------------------*/
 /* USER CODE BEGIN Includes */
-
+#include <string.h>
 /* USER CODE END Includes */
 
 /* Private typedef -----------------------------------------------------------*/
@@ -75,7 +75,13 @@ PCD_HandleTypeDef hpcd_USB_FS;
 /* USER CODE BEGIN PV */
 char uartBuf[150];
 
-// Spremenljivke za štetje korakov
+// ESP32 UART receive buffer
+#define ESP_RX_BUFFER_SIZE 512
+uint8_t esp_rx_buffer[ESP_RX_BUFFER_SIZE];
+uint16_t esp_rx_index = 0;
+uint8_t esp_rx_byte;  // Za interrupt receive
+
+
 uint32_t step_count = 0;
 uint32_t last_step_time = 0;
 float prev_magnitude = GRAVITY;
@@ -99,41 +105,86 @@ static void MX_USART1_UART_Init(void);
 /* Private user code ---------------------------------------------------------*/
 /* USER CODE BEGIN 0 */
 
+void ESP_ClearRxBuffer(void)
+{
+    if (esp_rx_index > 0)
+    {
+        HAL_UART_Transmit(&huart1, (uint8_t*)"[ESP RX]: ", 10, HAL_MAX_DELAY);
+        HAL_UART_Transmit(&huart1, esp_rx_buffer, esp_rx_index, HAL_MAX_DELAY);
+        HAL_UART_Transmit(&huart1, (uint8_t*)"\r\n", 2, HAL_MAX_DELAY);
+    }
+    
+    memset(esp_rx_buffer, 0, ESP_RX_BUFFER_SIZE);
+    esp_rx_index = 0;
+}
+
+HAL_StatusTypeDef ESP_WaitForResponse(const char* expected, uint32_t timeout)
+{
+    uint32_t start = HAL_GetTick();
+    while ((HAL_GetTick() - start) < timeout)
+    {
+        if (strstr((char*)esp_rx_buffer, expected) != NULL)
+        {
+            char msg[50];
+            int len = snprintf(msg, sizeof(msg), "[ESP OK]: Found '%s'\r\n", expected);
+            HAL_UART_Transmit(&huart1, (uint8_t*)msg, len, HAL_MAX_DELAY);
+            return HAL_OK;
+        }
+        HAL_Delay(10);
+    }
+    
+    char msg[50];
+    int len = snprintf(msg, sizeof(msg), "[ESP TIMEOUT]: '%s' not found\r\n", expected);
+    HAL_UART_Transmit(&huart1, (uint8_t*)msg, len, HAL_MAX_DELAY);
+    return HAL_TIMEOUT;
+}
+
 static void esp_start_webserver(void)
 {
   char cmd[96];
 
+  ESP_ClearRxBuffer();
   HAL_UART_Transmit(&huart2, (uint8_t*)"AT+SYSSTORE=1\r\n", 12, HAL_MAX_DELAY);
-  HAL_Delay(8000);
+  ESP_WaitForResponse("OK", 8000);
 
+  ESP_ClearRxBuffer();
   HAL_UART_Transmit(&huart2, (uint8_t*)"AT+CWMODE=3\r\n", 13, HAL_MAX_DELAY);
-  HAL_Delay(2000);
+  ESP_WaitForResponse("OK", 2000);
 
+  ESP_ClearRxBuffer();
   snprintf(cmd, sizeof(cmd), "AT+CWSAP=\"%s\",\"%s\",11,3,3\r\n", AP_SSID, AP_PASS);
-  //                                                    ^ 0 = OPEN (brez gesla)!
+
   HAL_UART_Transmit(&huart2, (uint8_t*)cmd, strlen(cmd), HAL_MAX_DELAY);
-  HAL_Delay(3000);
+  ESP_WaitForResponse("OK", 3000);
 
+  ESP_ClearRxBuffer();
   HAL_UART_Transmit(&huart2, (uint8_t*)"AT+CIPMUX=1\r\n", 13, HAL_MAX_DELAY);
-  HAL_Delay(1000);
+  ESP_WaitForResponse("OK", 1000);
 
+  ESP_ClearRxBuffer();
   snprintf(cmd, sizeof(cmd), "AT+WEBSERVER=1,%u,%u\r\n", WEBSERVER_PORT, WEBSERVER_TIMEOUT);
   HAL_UART_Transmit(&huart2, (uint8_t*)cmd, strlen(cmd), HAL_MAX_DELAY);
-  HAL_Delay(5000);
+  ESP_WaitForResponse("OK", 5000);
 }
 
 static HAL_StatusTypeDef esp_setup_wifi(void)
 {
+    ESP_ClearRxBuffer();
     HAL_UART_Transmit(&huart2, (uint8_t*)"AT+CWMODE=3\r\n", 13, HAL_MAX_DELAY);
-    HAL_Delay(2000);
+    ESP_WaitForResponse("OK", 2000);
 
     char cmd[128];
+    ESP_ClearRxBuffer();
     snprintf(cmd, sizeof(cmd), "AT+CWJAP=\"%s\",\"%s\"\r\n", WIFI_SSID, WIFI_PASS);
     HAL_UART_Transmit(&huart2, (uint8_t*)cmd, strlen(cmd), HAL_MAX_DELAY);
-    HAL_Delay(5000);
+    if (ESP_WaitForResponse("OK", 10000) != HAL_OK)
+    {
+        return HAL_ERROR;  
+    }
 
+    ESP_ClearRxBuffer();
     HAL_UART_Transmit(&huart2, (uint8_t*)"AT+CIPMUX=1\r\n", 13, HAL_MAX_DELAY);
-    HAL_Delay(1000);
+    ESP_WaitForResponse("OK", 1000);
 
     return HAL_OK;
 }
@@ -166,28 +217,31 @@ void ESP_SendHTTPPost(const char* type, float value)
     int request_len = strlen(http_request);
 
     // 3. Zapri morebitno odprto povezavo (z link ID!)
+    ESP_ClearRxBuffer();
     snprintf(cmd, sizeof(cmd), "AT+CIPCLOSE=%d\r\n", link_id);
     HAL_UART_Transmit(&huart2, (uint8_t*)cmd, strlen(cmd), HAL_MAX_DELAY);
     HAL_Delay(500);
 
     // 4. Odpri TCP povezavo (z link ID!)
+    ESP_ClearRxBuffer();
     snprintf(cmd, sizeof(cmd), "AT+CIPSTART=%d,\"TCP\",\"172.20.10.10\",3001\r\n", link_id);
     HAL_UART_Transmit(&huart2, (uint8_t*)cmd, strlen(cmd), HAL_MAX_DELAY);
-    HAL_Delay(5000);  // Povečan delay za zanesljivost
+    ESP_WaitForResponse("OK", 5000);
 
+    ESP_ClearRxBuffer();
     snprintf(cmd, sizeof(cmd), "AT+CIPSEND=%d,%d\r\n", link_id, request_len);
     HAL_UART_Transmit(&huart2, (uint8_t*)cmd, strlen(cmd), HAL_MAX_DELAY);
-    HAL_Delay(2000);  // Počakaj na ">" prompt
+    ESP_WaitForResponse(">", 2000);  
 
+    ESP_ClearRxBuffer();
     HAL_UART_Transmit(&huart2, (uint8_t*)http_request, request_len, HAL_MAX_DELAY);
-    HAL_Delay(3000);
+    ESP_WaitForResponse("SEND OK", 3000);
 
+    HAL_Delay(500);  
     snprintf(cmd, sizeof(cmd), "AT+CIPCLOSE=%d\r\n", link_id);
     HAL_UART_Transmit(&huart2, (uint8_t*)cmd, strlen(cmd), HAL_MAX_DELAY);
-    HAL_Delay(500);
 }
 
-// Temperatura
 float Read_Temperature(void)
 {
     uint32_t adc_value;
@@ -232,7 +286,7 @@ void LSM303DLHC_ReadAccel(int16_t* x, int16_t* y, int16_t* z)
     uint8_t buffer[6];
 
     HAL_I2C_Mem_Read(&hi2c1, LSM303DLHC_ACC_ADDR,
-                     LSM303DLHC_OUT_X_L_A | 0x80,  // 0x80 = auto-increment
+                     LSM303DLHC_OUT_X_L_A | 0x80,  
                      I2C_MEMADD_SIZE_8BIT,
                      buffer, 6, HAL_MAX_DELAY);
 
@@ -334,6 +388,9 @@ int main(void)
   HAL_ADCEx_Calibration_Start(&hadc1, ADC_SINGLE_ENDED);
   HAL_Delay(1000);
 
+
+  HAL_UART_Receive_IT(&huart2, &esp_rx_byte, 1);
+
   HAL_Delay(5000);
 
   LSM303DLHC_Init();
@@ -362,10 +419,8 @@ int main(void)
       float ax, ay, az;
       LSM303DLHC_ReadAccel_G(&ax, &ay, &az);
 
-      // Procesiranje korakov
       magnitude = Process_Steps(ax, ay, az);
 
-      // Debug izpis vsakih 1000 ms
       if (HAL_GetTick() - temp_update_time > 1000)
       {
           temp_update_time = HAL_GetTick();
@@ -386,22 +441,20 @@ int main(void)
 
           float temperatura = Read_Temperature();
 
-          // Pošlji temperaturo
           ESP_SendHTTPPost("temperature", temperatura);
 
-          HAL_Delay(500);  // Kratek delay med poštama
+          HAL_Delay(500);  
 
-          // Pošlji korake
           ESP_SendHTTPPost("steps", (float)step_count);
 
-          // Debug izpis
+
           int len = snprintf(uartBuf, sizeof(uartBuf),
                             ">>> Podatki poslani: Temp=%.1f°C, Koraki=%lu\r\n",
                             temperatura, step_count);
           HAL_UART_Transmit(&huart2, (uint8_t*)uartBuf, len, HAL_MAX_DELAY);
       }
 
-      HAL_Delay(10);  // 100 Hz vzorčenje
+      HAL_Delay(10);  
     }
   /* USER CODE END 3 */
 }
@@ -769,6 +822,20 @@ static void MX_GPIO_Init(void)
 }
 
 /* USER CODE BEGIN 4 */
+
+void HAL_UART_RxCpltCallback(UART_HandleTypeDef *huart)
+{
+    if (huart->Instance == USART2)
+    {
+        if (esp_rx_index < ESP_RX_BUFFER_SIZE - 1)
+        {
+            esp_rx_buffer[esp_rx_index++] = esp_rx_byte;
+            esp_rx_buffer[esp_rx_index] = '\0';
+        }
+        
+        HAL_UART_Receive_IT(&huart2, &esp_rx_byte, 1);
+    }
+}
 
 /* USER CODE END 4 */
 
